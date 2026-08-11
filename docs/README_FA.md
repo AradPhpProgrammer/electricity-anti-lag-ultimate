@@ -2,9 +2,16 @@
 
 > **سیستم تثبیت‌کننده ولتاژ، حذف لغزش الکتریکی و سینک فاز پورت‌های ورودی (موس و کیبورد) به زبان Rust**
 
-[![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](../LICENSE)
+![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)
+![Release](https://img.shields.io/badge/Release-v1.0.0-blueviolet.svg)](https://github.com/AradPhpProgrammer/electricity-anti-lag-ultimate/releases/tag/v1.0.0)
+![License](https://img.shields.io/badge/License-MIT-green.svg)](../LICENSE)
+
+---
+
+## 🚀 دانلود سریع و مستقیم
+می‌توانید فایل اجرایی بهینه‌شده و آماده را مستقیماً از بخش Releases گیت‌هاب دانلود کنید:
+- **[دانلود مستقیم electricity_anti_lag_ultimate.exe (نسخه v1.0.0)](https://github.com/AradPhpProgrammer/electricity-anti-lag-ultimate/releases/download/v1.0.0/electricity_anti_lag_ultimate.exe)**
 
 ---
 
@@ -25,15 +32,29 @@
 
 ---
 
+## 📊 چگونه بنچمارک بگیریم و تاثیر آن را اثبات کنیم؟
+برای اثبات علمی و عملی تاثیر این ابزار در بازی‌هایی مثل CS2، می‌توانید از روش‌های زیر استفاده کنید:
+
+### ۱. بررسی دقت تایمر ویندوز (Timer Resolution Check)
+به طور پیش‌فرض، ویندوز روی دقت ۱۵.۶ میلی‌ثانیه کار می‌کند. با اجرای این ابزار، دقت تایمر به ۱.۰ میلی‌ثانیه قفل می‌شود. می‌توانید با ابزارهایی مثل  یا دستورات PowerShell این تغییر را به چشم ببینید.
+
+### ۲. نمودار تأخیر درون‌بازی CS2 ()
+- در بازی CS2 دستور  را بزنید تا نوسانات فریم‌تایم () نمایش داده شود.
+- هنگام تکان دادن سریع موس (Flick)، میزان پرش فریم‌تایم در حالت روشن بودن ابزار در مقایسه با خاموش بودن آن به طور محسوسی کاهش می‌یابد (حذف ریزلگ).
+
+### ۳. نرم‌افزار LatencyMon
+- با اجرای نرم‌افزار  حین بازی، می‌توانید کاهش زمان پاسخ‌دهی روال‌های DPC و ISR را در سیستم خود مشاهده کنید.
+
+---
+
 ## ⚙️ نحوه کامپایل و اجرا
-برای ساخت و کامپایل پروژه از دستور زیر استفاده کنید:
 
-
-
-فایل اجرایی نهایی پس از کامپایل در مسیر زیر قرار خواهد گرفت:
-
+فایل اجرایی در مسیر  ساخته خواهد شد.
 
 ---
 
 ## 📄 لایسنس
 این پروژه تحت **لایسنس MIT** منتشر شده است. برای اطلاعات بیشتر فایل [LICENSE](../LICENSE) را مطالعه کنید.
+
+---
+**تگ‌ها:** #rust #cs2 #anti-lag #gaming #latency-optimization #windows-api #polling-rate #pll-sync #input-lag
