@@ -2,9 +2,9 @@
 
 > **سیستم تثبیت‌کننده ولتاژ، حذف لغزش الکتریکی و سینک فاز پورت‌های ورودی (موس و کیبورد) به زبان Rust**
 
-![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)
-![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)
-![License](https://img.shields.io/badge/License-MIT-green.svg)
+[![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](../LICENSE)
 
 ---
 
@@ -26,5 +26,14 @@
 ---
 
 ## ⚙️ نحوه کامپایل و اجرا
+برای ساخت و کامپایل پروژه از دستور زیر استفاده کنید:
 
-فایل اجرایی در مسیر  ساخته خواهد شد.
+
+
+فایل اجرایی نهایی پس از کامپایل در مسیر زیر قرار خواهد گرفت:
+
+
+---
+
+## 📄 لایسنس
+این پروژه تحت **لایسنس MIT** منتشر شده است. برای اطلاعات بیشتر فایل [LICENSE](../LICENSE) را مطالعه کنید.
