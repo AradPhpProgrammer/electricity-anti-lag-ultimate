@@ -7,6 +7,10 @@
 [![Release](https://img.shields.io/badge/Release-v1.0.0-blueviolet.svg)](https://github.com/AradPhpProgrammer/electricity-anti-lag-ultimate/releases/tag/v1.0.0)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+
+## ⚠️ IMPORTANT NOTICE / DISCLAIMER
+> This tool modifies low-level system timers, process thread priorities, and CPU affinity. **DO NOT use this tool on servers protected by kernel-level anti-cheats such as FACEIT, ESEA, or Vanguard.** Doing so may result in an immediate hardware ID (HWID) ban. The authors and maintainers assume **no responsibility** for any bans or system instability incurred by using this software on restricted platforms.
+
 ---
 
 ### 🌐 Select Language / Выберите язык / انتخاب زبان
