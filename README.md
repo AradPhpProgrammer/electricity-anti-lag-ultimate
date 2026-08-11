@@ -4,6 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
+[![Release](https://img.shields.io/badge/Release-v1.0.0-blueviolet.svg)](https://github.com/AradPhpProgrammer/electricity-anti-lag-ultimate/releases/tag/v1.0.0)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
@@ -14,6 +15,12 @@
 | **English** | 🇬🇧 | *Current Page* |
 | **Persian (فارسی)** | 🦁☀️ | [مشاهده راهنمای فارسی](docs/README_FA.md) |
 | **Russian (Русский)** | 🇷🇺 | [Читать на русском](docs/README_RU.md) |
+
+---
+
+## 🚀 Quick Download
+Download the ready-to-use optimized executable directly from GitHub Releases:
+- **[Download electricity_anti_lag_ultimate.exe (v1.0.0)](https://github.com/AradPhpProgrammer/electricity-anti-lag-ultimate/releases/download/v1.0.0/electricity_anti_lag_ultimate.exe)**
 
 ---
 
@@ -34,6 +41,22 @@ In competitive FPS gaming (e.g. **Counter-Strike 2**, **Valorant**), micro-varia
 
 ---
 
+## 📊 How to Benchmark & Prove Input Lag Reduction
+To scientifically prove the effectiveness of **Electricity Anti-Lag Ultimate** in competitive games like CS2, use the following methods:
+
+### 1. Windows Timer Resolution Check (TimerTool / PowerShell)
+By default, Windows operates on a 15.6ms timer quantum. When active, this tool forces 1ms.
+- Run  or check with PowerShell to confirm system timer resolution drops from  to .
+
+### 2. CS2 Built-in Latency Graph ( / )
+- In CS2, enable  or the performance overlay.
+- Compare frame time variance () and input processing latency with the stabilizer ON vs. OFF during rapid mouse flicking. You will notice a reduction in frame time spikes (Micro-stutter removal).
+
+### 3. LatencyMon (DPC & ISR Latency)
+- Run  while gaming with and without the tool. Notice the reduction in highest DPC routine execution time and ISR latency spikes.
+
+---
+
 ## 🛠 Building from Source
 Ensure you have the Rust toolchain installed:
 
@@ -44,3 +67,6 @@ The compiled executable will be available at .
 
 ## 📄 License
 Distributed under the **MIT License**. See  for more information.
+
+---
+**Tags:** #rust #cs2 #anti-lag #gaming #latency-optimization #windows-api #polling-rate #pll-sync #input-lag
