@@ -7,6 +7,10 @@
 ![Release](https://img.shields.io/badge/Release-v1.0.0-blueviolet.svg)](https://github.com/AradPhpProgrammer/electricity-anti-lag-ultimate/releases/tag/v1.0.0)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)](../LICENSE)
 
+
+## ⚠️ هشدار مهم و سلب مسئولیت
+> این ابزار سطوح پایین ویندوز شامل تایمرهای سیستمی، اولویت تردها و ایزوله‌سازی هسته‌ها را تغییر می‌دهد. **به هیچ وجه از این ابزار در سرورها یا پلتفرم‌های مجهز به آنتی‌چیت سطح کرنل (مثل FACEIT، ESEA یا Vanguard) استفاده نکنید.** استفاده در این پلتفرم‌ها ممکن است منجر به بن قطعی سخت‌افزاری (HWID Ban) شود. مسئولیت استفاده از این نرم‌افزار در پلتفرم‌های محافظت‌شده کاملاً بر عهده شخص کاربر است.
+
 ---
 
 ## 🚀 دانلود سریع و مستقیم
