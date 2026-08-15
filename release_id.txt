@@ -1,2 +1,0 @@
-370968469
-https://uploads.github.com/repos/AradPhpProgrammer/electricity-anti-lag-ultimate/releases/370968469/assets{?name,label}

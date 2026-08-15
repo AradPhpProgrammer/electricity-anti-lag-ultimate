@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.pdb
 *.d
+*.exe
+release_id.txt
