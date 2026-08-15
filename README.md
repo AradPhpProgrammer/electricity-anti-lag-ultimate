@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-blue?style=for-the-badge&logo=windows)](https://microsoft.com)
 
-**[English](README.md)** • **[فارسی](README_FA.md)** • **[Русский](README_RU.md)**
+**[English](README.md)** • **[فارسی](docs/README_FA.md)** • **[Русский](docs/README_RU.md)**
 
 ---
 
@@ -89,6 +89,11 @@ Works inside **100% of fullscreen games** (DirectX 11, DirectX 12, Vulkan, OpenG
 ## 🛡 Safety & Clean Exit Guarantee
 - **100% Reversible:** All system tweaks (C-States, Nagle, Affinity, Timer) are applied in-memory and cleanly restored to default Windows settings when you close the app or click Reset.
 - **No VAC / Anti-Cheat Risk:** Hermes Engine operates purely on standard Windows OS APIs without injecting DLLs, reading game memory, or modifying game files.
+
+---
+
+## ⚠️ Anti-Cheat Disclaimer (FACEIT, ESEA, etc.)
+**We have NOT tested Hermes Engine on FACEIT, ESEA, or other third-party anti-cheat platforms.** We take absolutely NO responsibility if you use this tool on FACEIT or similar services and face any consequences, bans, or account restrictions. Use at your own risk on such platforms.
 
 ---
 

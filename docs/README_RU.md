@@ -7,7 +7,7 @@
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
 
-**[English](README.md)** • **[فارسی](README_FA.md)** • **[Русский](README_RU.md)**
+**[English](../README.md)** • **[فارسی](README_FA.md)** • **[Русский](README_RU.md)**
 
 ---
 
@@ -82,6 +82,11 @@
 ## 🛡 Безопасность и Античит
 - **100% Обратимость:** Все изменения восстанавливаются в исходное состояние при закрытии программы.
 - **Безопасно для Anti-Cheat:** Не внедряется в процессы игр и не читает память. Полностью легально для VAC, Vanguard, EAC и BattlEye.
+
+---
+
+## ⚠️ Предупреждение о FACEIT и сторонних античитах
+**Мы НЕ тестировали Hermes Engine на FACEIT, ESEA или других сторонних античит-платформах.** Мы не несём никакой ответственности, если вы будете использовать этот инструмент на FACEIT или аналогичных сервисах. Весь риск (включая блокировку аккаунта) лежит исключительно на вас.
 
 ---
 
