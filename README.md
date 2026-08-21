@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⚡ Hermes Engine v3.0.0 Ultimate
+# ⚡ Hermes Engine v4.0.0 Ultimate
 ### Sub-Microsecond Gaming Input-Lag & Phase-Locked Loop (PLL) Optimizer for Windows
 
 [![Release](https://img.shields.io/github/v/release/AradPhpProgrammer/electricity-anti-lag-ultimate?style=for-the-badge&color=00D4FF)](https://github.com/AradPhpProgrammer/electricity-anti-lag-ultimate/releases/latest)
@@ -21,11 +21,22 @@
 
 ---
 
+## 🚀 What's New in Version 4.0.0 (L0 Critical Path Isolation)
+
+Hermes Engine v4.0.0 is a major architecture update focused on **L0 ultra-low latency timing optimization**:
+- **Isolated L0 Timing Engine:** `MouseModulator`, `HzDetector`, and `ClockStabilityMonitor` are now completely worker-local inside `hermes-pll-worker`, preventing cross-thread lock contention.
+- **Cache-Line Aligned Atomic State:** Split shared state into cache-line-aligned UI-to-worker control atomics and worker-to-UI telemetry atomics (0% false sharing).
+- **Packed Hz Control Word:** Consolidated Auto/Manual Hz mode and manual rate into a single atomic word for zero-overhead mode transitions.
+- **Sub-tick Batch Telemetry:** Telemetry (PLL phase, resolved Hz, clock health) is now published every 8 ticks instead of every tick, reducing bus overhead and CPU tax by ~87%.
+- **O(1) Rolling Clock Analytics:** Clock stability statistics (mean, std-dev, coefficient of variation) are computed in constant O(1) time using running sum and sum-of-squares tracking.
+
+---
+
 ## ⚡ Quick Start Guide (Recommended Setup)
 
 Want the best possible performance in 10 seconds? Follow these simple steps:
 
-1. **Run as Administrator:** Right-click `hermes-engine.exe` and select **Run as Administrator** (needed for Windows timer resolution & MSI registry guards).
+1. **Run as Administrator:** Right-click `HermesEngine-v4.0.0.exe` and select **Run as Administrator** (needed for Windows timer resolution & MSI registry guards).
 2. **Hit Start Engine:** In the **🚀 PLL Engine** tab, click **START PLL ENGINE** (or press `Alt + 1` in-game).
 3. **Select Server Tick Rate:**
    - For **CS2 / Valorant / Apex:** Leave on **128 Hz (Sub-tick / High-precision)**.
@@ -98,9 +109,4 @@ Works inside **100% of fullscreen games** (DirectX 11, DirectX 12, Vulkan, OpenG
 ---
 
 ## 🙏 Special Thanks & Credits
-Huge special thanks to **@bardiavam** for his significant contributions, invaluable architectural improvements, and continuous testing throughout the evolution of the Hermes Engine series! 🚀
-
----
-
-## 📄 License
-Released under the [MIT License](LICENSE). Built with ❤️ by **Arad** and the open-source community.
+- **bardiavam:** Huge thanks for refactoring and isolating the L0 timing critical path in v4.0.0!
