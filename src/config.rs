@@ -4,8 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::pll::{PllConfig, TickRate};
 use crate::input::HzMode;
+use crate::pll::{PllConfig, TickRate};
 
 #[derive(Clone, Debug)]
 pub struct HermesConfig {
@@ -160,10 +160,13 @@ impl HermesConfig {
         content.push_str(&format!("pll_ki={}\n", self.pll.ki));
         content.push_str(&format!("pll_lfo_amp={}\n", self.pll.lfo_amp_us));
         content.push_str(&format!("pll_lfo_period={}\n", self.pll.lfo_period_s));
-        content.push_str(&format!("hz_mode={}\n", match self.hz_mode {
-            HzMode::Auto => "auto",
-            HzMode::Manual => "manual",
-        }));
+        content.push_str(&format!(
+            "hz_mode={}\n",
+            match self.hz_mode {
+                HzMode::Auto => "auto",
+                HzMode::Manual => "manual",
+            }
+        ));
         content.push_str(&format!("manual_hz={}\n", self.manual_hz));
         content.push_str(&format!("timer_resolution={}\n", self.timer_resolution));
         content.push_str(&format!("ram_only={}\n", self.ram_only));
