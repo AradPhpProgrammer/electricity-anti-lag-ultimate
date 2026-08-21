@@ -43,7 +43,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1_300.0, 900.0])
             .with_min_inner_size([1_080.0, 750.0])
-            .with_title("⚡ Hermes Engine Ultimate v5.4 — Sub-Microsecond Precision Engine"),
+            .with_title("⚡ Hermes Engine Ultimate v4.0.0 — Sub-Microsecond Precision Engine"),
         ..Default::default()
     };
     eframe::run_native(
@@ -428,7 +428,7 @@ impl HermesApp {
                 ui.add_space(14.0);
                 ui.label(RichText::new("HERMES").size(26.0).strong().color(ACCENT));
                 ui.label(
-                    RichText::new("ENGINE v3")
+                    RichText::new("ENGINE v4")
                         .size(15.0)
                         .strong()
                         .color(Color32::from_gray(160)),
