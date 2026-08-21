@@ -5,10 +5,14 @@ use egui_plot::{Legend, Line, Plot, PlotPoints};
 use hermes_engine::config::HermesConfig;
 use hermes_engine::games::detect_running_game;
 use hermes_engine::hotkey::{drain_click, drain_reset, drain_toggle, spawn_hotkey_thread};
-use hermes_engine::input::{ClickInterrupt, HzDetector, HzMode, MouseModulator, POLLING_CANDIDATES};
+use hermes_engine::input::{
+    ClickInterrupt, HzDetector, HzMode, MouseModulator, POLLING_CANDIDATES,
+};
 use hermes_engine::network::NetworkGuard;
 use hermes_engine::platform::{platform_name, ClockStabilityMonitor, TimerResolutionGuard};
-use hermes_engine::pll::{PllConfig, PllEngine, PllShared, TickRate};
+use hermes_engine::pll::{
+    PllConfig, PllEngine, PllShared, TickRate, TELEMETRY_PUBLISH_INTERVAL_TICKS,
+};
 use hermes_engine::system_mod::SystemGuard;
 use hermes_engine::telemetry::Preset;
 use std::collections::VecDeque;
@@ -17,10 +21,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const ACCENT: Color32 = Color32::from_rgb(0, 212, 255);       // Neon Cyan
-const GREEN: Color32 = Color32::from_rgb(52, 211, 153);       // Emerald
-const AMBER: Color32 = Color32::from_rgb(251, 191, 36);       // Golden Amber
-const RED: Color32 = Color32::from_rgb(248, 113, 113);         // Coral Red
+const ACCENT: Color32 = Color32::from_rgb(0, 212, 255); // Neon Cyan
+const GREEN: Color32 = Color32::from_rgb(52, 211, 153); // Emerald
+const AMBER: Color32 = Color32::from_rgb(251, 191, 36); // Golden Amber
+const RED: Color32 = Color32::from_rgb(248, 113, 113); // Coral Red
 const PANEL: Color32 = Color32::from_rgb(18, 22, 31);
 const PANEL_ALT: Color32 = Color32::from_rgb(24, 30, 42);
 const BG_DARK: Color32 = Color32::from_rgb(11, 14, 20);
@@ -54,10 +58,7 @@ struct HermesApp {
     cfg: HermesConfig,
     running: Arc<AtomicBool>,
     pll_shared: Arc<PllShared>,
-    hz_detector: Arc<std::sync::Mutex<HzDetector>>,
-    mouse_modulator: Arc<std::sync::Mutex<MouseModulator>>,
     click_interrupt: Arc<ClickInterrupt>,
-    clock_monitor: Arc<std::sync::Mutex<ClockStabilityMonitor>>,
     network_guard: Arc<std::sync::Mutex<NetworkGuard>>,
     system_guard: Arc<std::sync::Mutex<SystemGuard>>,
 
@@ -67,6 +68,7 @@ struct HermesApp {
 
     latest_clock_mean_us: f64,
     latest_clock_instability: f64,
+    latest_resolved_hz: u32,
 
     // Polling rate selectors
     selected_mouse_hz: u32,
@@ -110,14 +112,13 @@ impl HermesApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         configure_style(&cc.egui_ctx);
         let cfg = HermesConfig::load();
-        let pll_shared = Arc::new(PllShared::new(cfg.tick_rate));
+        let pll_shared = Arc::new(PllShared::new(cfg.tick_rate, cfg.hz_mode, cfg.manual_hz));
         pll_shared.store_cfg(cfg.pll);
-
-        let hz_detector = Arc::new(std::sync::Mutex::new(HzDetector::new(
-            cfg.hz_mode,
-            cfg.manual_hz,
-        )));
-        let clock_monitor = Arc::new(std::sync::Mutex::new(ClockStabilityMonitor::default()));
+        let initial_resolved_hz = if cfg.hz_mode == HzMode::Auto {
+            125
+        } else {
+            cfg.manual_hz
+        };
 
         let _hotkey_state = spawn_hotkey_thread();
 
@@ -137,16 +138,14 @@ impl HermesApp {
             cfg,
             running: Arc::new(AtomicBool::new(false)),
             pll_shared,
-            hz_detector,
-            mouse_modulator: Arc::new(std::sync::Mutex::new(MouseModulator::new())),
             click_interrupt: Arc::new(ClickInterrupt::new()),
-            clock_monitor,
             network_guard: Arc::new(std::sync::Mutex::new(NetworkGuard::new())),
             system_guard: Arc::new(std::sync::Mutex::new(SystemGuard::new())),
             wake_history: VecDeque::with_capacity(640),
             jitter_history: VecDeque::with_capacity(640),
             latest_clock_mean_us: 0.0,
             latest_clock_instability: 0.0,
+            latest_resolved_hz: initial_resolved_hz,
             game_name: None,
             status: "Ready. Hotkeys Active: Alt+1 (Toggle) · Alt+2 (Shot Resync)".into(),
             worker_join: None,
@@ -217,13 +216,19 @@ impl HermesApp {
             lfo_amp_us: self.pll_lfo_amp,
             lfo_period_s: self.pll_lfo_period,
         });
+        self.pll_shared.store_hz_config(
+            if self.is_auto_hz {
+                HzMode::Auto
+            } else {
+                HzMode::Manual
+            },
+            self.selected_mouse_hz,
+        );
 
+        self.running.store(true, Ordering::Release);
         let flag = Arc::clone(&self.running);
         let shared = Arc::clone(&self.pll_shared);
         let click = Arc::clone(&self.click_interrupt);
-        let mouse_mod = Arc::clone(&self.mouse_modulator);
-        let clock_mon = Arc::clone(&self.clock_monitor);
-        let hz_det = Arc::clone(&self.hz_detector);
         let cfg = self.cfg.clone();
         let auto_tune = self.auto_tune;
 
@@ -233,15 +238,23 @@ impl HermesApp {
                 let _timer = TimerResolutionGuard::request(cfg.timer_resolution);
                 let mut engine = PllEngine::new(cfg.tick_rate);
                 engine.apply_cfg(cfg.pll);
+                let initial_hz_config = shared.load_hz_config();
+                let mut hz_detector =
+                    HzDetector::new(initial_hz_config.mode, initial_hz_config.manual_hz);
+                let mut applied_hz_config = initial_hz_config;
+                let mut mouse_modulator = MouseModulator::new();
+                let mut clock_monitor = ClockStabilityMonitor::default();
                 let mut last_instant = Instant::now();
                 let mut ticks_since_tune = 0;
 
                 while flag.load(Ordering::Acquire) {
                     let mut live_cfg = shared.load_cfg();
-                    let live_rate = match shared.tick_rate.load(Ordering::Acquire) {
-                        64 => TickRate::Hz64,
-                        _ => TickRate::Hz128,
-                    };
+                    let live_rate = shared.load_tick_rate();
+                    let live_hz_config = shared.load_hz_config();
+                    if live_hz_config != applied_hz_config {
+                        hz_detector.apply_config(live_hz_config);
+                        applied_hz_config = live_hz_config;
+                    }
 
                     // Smart Auto-Tuner
                     if auto_tune {
@@ -277,11 +290,8 @@ impl HermesApp {
 
                     // Layer 2: Mouse Delta Modulator
                     let now_us = engine.clock.now_us();
-                    let mouse_shift_us = if let Ok(mut mm) = mouse_mod.lock() {
-                        mm.feed(now_us, engine.tick_rate.us_per_tick())
-                    } else {
-                        0.0
-                    };
+                    let mouse_shift_us =
+                        mouse_modulator.feed(now_us, engine.tick_rate.us_per_tick());
 
                     // Sync PLL power from shared atomics into engine cfg
                     engine.cfg.power = shared.load_power();
@@ -300,29 +310,42 @@ impl HermesApp {
 
                     // High-resolution spin to exact microsecond deadline
                     let spin_start = Instant::now();
-                    let spin_deadline = cycle_start + Duration::from_micros(planned_sleep_us as u64);
+                    let spin_deadline =
+                        cycle_start + Duration::from_micros(planned_sleep_us as u64);
                     while Instant::now() < spin_deadline {
                         std::hint::spin_loop();
                     }
                     let spin_elapsed_us = spin_start.elapsed().as_secs_f64() * 1_000_000.0;
 
                     let actual_end = Instant::now();
-                    let actual_total_us = actual_end.duration_since(last_instant).as_secs_f64() * 1_000_000.0;
+                    let actual_total_us =
+                        actual_end.duration_since(last_instant).as_secs_f64() * 1_000_000.0;
                     last_instant = actual_end;
 
-                    if let Ok(mut mon) = clock_mon.lock() {
-                        mon.observe(engine.clock.now_us());
-                    }
-                    if let Ok(mut d) = hz_det.lock() {
-                        d.feed_us(engine.clock.now_us());
-                    }
+                    let observed_now_us = engine.clock.now_us();
+                    clock_monitor.observe(observed_now_us);
+                    hz_detector.feed_us(observed_now_us);
 
-                    engine.record_actual_cycle(planned_sleep_us, actual_total_us, spin_elapsed_us, &shared);
+                    engine.record_actual_cycle(
+                        planned_sleep_us,
+                        actual_total_us,
+                        spin_elapsed_us,
+                        mouse_shift_us,
+                    );
+
+                    if engine.tick_index & (TELEMETRY_PUBLISH_INTERVAL_TICKS - 1) == 0 {
+                        shared.publish(
+                            engine.snapshot(),
+                            hz_detector.resolved_hz(),
+                            clock_monitor.mean_us(),
+                            clock_monitor.instability_ratio(),
+                            clock_monitor.samples(),
+                        );
+                    }
                 }
             })
             .expect("failed to start PLL worker thread");
         self.worker_join = Some(handle);
-        self.running.store(true, Ordering::Release);
         self.status = "⚡ Sub-Microsecond PLL Engine ACTIVE · Phase Locked.".into();
 
         // Telemetry Worker
@@ -351,9 +374,11 @@ impl HermesApp {
                     }
                     if !hist.is_empty() {
                         let mut sorted: Vec<f64> = hist.iter().copied().collect();
-                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        sorted
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                         let pct = |p: f64| {
-                            let idx = ((p * (sorted.len() as f64 - 1.0)) as usize).min(sorted.len() - 1);
+                            let idx =
+                                ((p * (sorted.len() as f64 - 1.0)) as usize).min(sorted.len() - 1);
                             sorted[idx]
                         };
                         let mut latest = raw_latest.lock().unwrap();
@@ -402,7 +427,12 @@ impl HermesApp {
             ui.horizontal(|ui| {
                 ui.add_space(14.0);
                 ui.label(RichText::new("HERMES").size(26.0).strong().color(ACCENT));
-                ui.label(RichText::new("ENGINE v3").size(15.0).strong().color(Color32::from_gray(160)));
+                ui.label(
+                    RichText::new("ENGINE v3")
+                        .size(15.0)
+                        .strong()
+                        .color(Color32::from_gray(160)),
+                );
                 ui.add_space(16.0);
                 ui.label(
                     RichText::new(format!("v{} · {}", hermes_engine::VERSION, platform_name()))
@@ -419,11 +449,21 @@ impl HermesApp {
                     ui.label(RichText::new(label).size(15.0).strong().color(color));
                     ui.add_space(12.0);
                     if self.ram_only {
-                        ui.label(RichText::new("⚡ RAM-ONLY").size(14.0).strong().color(AMBER));
+                        ui.label(
+                            RichText::new("⚡ RAM-ONLY")
+                                .size(14.0)
+                                .strong()
+                                .color(AMBER),
+                        );
                     }
                     if self.auto_tune {
                         ui.add_space(8.0);
-                        ui.label(RichText::new("🧠 AUTO-OPTIMIZER ON").size(14.0).strong().color(GREEN));
+                        ui.label(
+                            RichText::new("🧠 AUTO-OPTIMIZER ON")
+                                .size(14.0)
+                                .strong()
+                                .color(GREEN),
+                        );
                     }
                 });
             });
@@ -435,36 +475,68 @@ impl HermesApp {
         egui::SidePanel::left("tabs")
             .exact_width(210.0)
             .resizable(false)
-            .frame(egui::Frame::none().fill(Color32::from_rgb(14, 18, 25)).inner_margin(egui::Margin::same(16.0)))
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(14, 18, 25))
+                    .inner_margin(egui::Margin::same(16.0)),
+            )
             .show(ctx, |ui| {
                 ui.add_space(8.0);
-                ui.label(RichText::new("CORE NAVIGATION").size(13.0).strong().color(ACCENT));
+                ui.label(
+                    RichText::new("CORE NAVIGATION")
+                        .size(13.0)
+                        .strong()
+                        .color(ACCENT),
+                );
                 ui.add_space(10.0);
 
-                if ui.selectable_label(self.tab == Tab::Engine, "🚀  PLL Engine").clicked() {
+                if ui
+                    .selectable_label(self.tab == Tab::Engine, "🚀  PLL Engine")
+                    .clicked()
+                {
                     self.tab = Tab::Engine;
                 }
                 ui.add_space(6.0);
-                if ui.selectable_label(self.tab == Tab::Lab, "📊  Timing & Jitter Lab").clicked() {
+                if ui
+                    .selectable_label(self.tab == Tab::Lab, "📊  Timing & Jitter Lab")
+                    .clicked()
+                {
                     self.tab = Tab::Lab;
                 }
                 ui.add_space(6.0);
-                if ui.selectable_label(self.tab == Tab::Input, "🖱  Input & Hardware Hz").clicked() {
+                if ui
+                    .selectable_label(self.tab == Tab::Input, "🖱  Input & Hardware Hz")
+                    .clicked()
+                {
                     self.tab = Tab::Input;
                 }
                 ui.add_space(6.0);
-                if ui.selectable_label(self.tab == Tab::System, "⚙  System & Power Tuners").clicked() {
+                if ui
+                    .selectable_label(self.tab == Tab::System, "⚙  System & Power Tuners")
+                    .clicked()
+                {
                     self.tab = Tab::System;
                 }
                 ui.add_space(6.0);
-                if ui.selectable_label(self.tab == Tab::Settings, "⌨  Hotkeys & Settings").clicked() {
+                if ui
+                    .selectable_label(self.tab == Tab::Settings, "⌨  Hotkeys & Settings")
+                    .clicked()
+                {
                     self.tab = Tab::Settings;
                 }
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.add_space(10.0);
-                    ui.label(RichText::new("Alt+1: Toggle · Alt+2: Shot").size(13.0).color(Color32::from_gray(130)));
-                    ui.label(RichText::new(self.status.clone()).size(13.0).color(Color32::from_gray(180)));
+                    ui.label(
+                        RichText::new("Alt+1: Toggle · Alt+2: Shot")
+                            .size(13.0)
+                            .color(Color32::from_gray(130)),
+                    );
+                    ui.label(
+                        RichText::new(self.status.clone())
+                            .size(13.0)
+                            .color(Color32::from_gray(180)),
+                    );
                 });
             });
     }
@@ -522,6 +594,11 @@ impl HermesApp {
                             lfo_period_s: self.pll_lfo_period,
                         };
                         self.cfg.manual_hz = self.selected_mouse_hz;
+                        self.cfg.hz_mode = if self.is_auto_hz {
+                            HzMode::Auto
+                        } else {
+                            HzMode::Manual
+                        };
                         if let Err(e) = self.cfg.save() {
                             self.status = format!("Save failed: {e}");
                         } else {
@@ -540,7 +617,7 @@ impl HermesApp {
                         format!("{} Hz", self.selected_tick_rate.hz()),
                         "Server tick sync & Brownian LFO drift");
                     layer_card(&mut cols[1], "LAYER 2 · Mouse Delta Mod",
-                        format!("{} Hz", self.selected_mouse_hz),
+                        format!("{} Hz", self.latest_resolved_hz),
                         "Phase shift relative to cursor velocity");
                     layer_card(&mut cols[2], "LAYER 3 · Click Interrupt",
                         if self.click_interrupt.is_pending() { "⚡ RESYNCING".into() } else { "READY (Alt+2)".into() },
@@ -649,66 +726,133 @@ impl HermesApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(10.0);
-                ui.label(RichText::new("MICROSECOND TIMING & JITTER LAB").size(22.0).strong());
-                ui.label(RichText::new("Real-time scheduler precision analysis · 100% microsecond resolution")
-                    .size(14.0).color(Color32::from_gray(150)));
+                ui.label(
+                    RichText::new("MICROSECOND TIMING & JITTER LAB")
+                        .size(22.0)
+                        .strong(),
+                );
+                ui.label(
+                    RichText::new(
+                        "Real-time scheduler precision analysis · 100% microsecond resolution",
+                    )
+                    .size(14.0)
+                    .color(Color32::from_gray(150)),
+                );
                 ui.add_space(14.0);
 
                 let raw = self.raw_latest.lock().unwrap().clone();
                 ui.columns(4, |cols| {
-                    metric_card(&mut cols[0], "LATEST OVERSHOOT", format_us(raw.latest_overshoot_us), false);
-                    metric_card(&mut cols[1], "p99 LATENCY", format_us(raw.p99_us), raw.p99_us > 300.0);
-                    metric_card(&mut cols[2], "p99.9 LATENCY", format_us(raw.p999_us), raw.p999_us > 600.0);
-                    metric_card(&mut cols[3], "MAX SPIKE", format_us(raw.max_us), raw.max_us > 1000.0);
+                    metric_card(
+                        &mut cols[0],
+                        "LATEST OVERSHOOT",
+                        format_us(raw.latest_overshoot_us),
+                        false,
+                    );
+                    metric_card(
+                        &mut cols[1],
+                        "p99 LATENCY",
+                        format_us(raw.p99_us),
+                        raw.p99_us > 300.0,
+                    );
+                    metric_card(
+                        &mut cols[2],
+                        "p99.9 LATENCY",
+                        format_us(raw.p999_us),
+                        raw.p999_us > 600.0,
+                    );
+                    metric_card(
+                        &mut cols[3],
+                        "MAX SPIKE",
+                        format_us(raw.max_us),
+                        raw.max_us > 1000.0,
+                    );
                 });
 
                 ui.add_space(16.0);
 
                 // Plot
-                ui.label(RichText::new("WAKE-UP OVERSHOOT & PHASE JITTER OVER TIME (30s Rolling)").size(14.0).strong().color(ACCENT));
+                ui.label(
+                    RichText::new("WAKE-UP OVERSHOOT & PHASE JITTER OVER TIME (30s Rolling)")
+                        .size(14.0)
+                        .strong()
+                        .color(ACCENT),
+                );
                 ui.add_space(8.0);
-                egui::Frame::none().fill(BG_DARK).rounding(8.0).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
-                    let wake_pts = PlotPoints::from_iter(self.wake_history.iter().copied());
-                    let jitter_pts = PlotPoints::from_iter(self.jitter_history.iter().copied());
-                    Plot::new("wake_plot")
-                        .height(280.0)
-                        .include_y(0.0)
-                        .allow_scroll(false)
-                        .allow_drag(false)
-                        .legend(Legend::default())
-                        .show(ui, |plot_ui| {
-                            plot_ui.line(Line::new(wake_pts).name("Wake Overshoot (µs)").color(ACCENT).width(2.0_f32));
-                            plot_ui.line(Line::new(jitter_pts).name("Phase Error (µs)").color(AMBER).width(2.0_f32));
-                        });
-                });
+                egui::Frame::none()
+                    .fill(BG_DARK)
+                    .rounding(8.0)
+                    .inner_margin(egui::Margin::same(12.0))
+                    .show(ui, |ui| {
+                        let wake_pts = PlotPoints::from_iter(self.wake_history.iter().copied());
+                        let jitter_pts = PlotPoints::from_iter(self.jitter_history.iter().copied());
+                        Plot::new("wake_plot")
+                            .height(280.0)
+                            .include_y(0.0)
+                            .allow_scroll(false)
+                            .allow_drag(false)
+                            .legend(Legend::default())
+                            .show(ui, |plot_ui| {
+                                plot_ui.line(
+                                    Line::new(wake_pts)
+                                        .name("Wake Overshoot (µs)")
+                                        .color(ACCENT)
+                                        .width(2.0_f32),
+                                );
+                                plot_ui.line(
+                                    Line::new(jitter_pts)
+                                        .name("Phase Error (µs)")
+                                        .color(AMBER)
+                                        .width(2.0_f32),
+                                );
+                            });
+                    });
 
                 ui.add_space(16.0);
 
                 // Session Health Summary
-                egui::Frame::none().fill(PANEL).rounding(8.0).inner_margin(egui::Margin::same(16.0)).show(ui, |ui| {
-                    ui.label(RichText::new("SESSION TIMING HEALTH AUDIT").size(14.0).strong().color(ACCENT));
-                    ui.add_space(10.0);
-                    egui::Grid::new("lab_details").num_columns(4).spacing([36.0, 10.0]).striped(true).show(ui, |ui| {
-                        ui.label(RichText::new("Median (p50):").size(15.0).strong());
-                        ui.label(RichText::new(format_us(raw.p50_us)).size(15.0));
-                        ui.label(RichText::new("p95 Percentile:").size(15.0).strong());
-                        ui.label(RichText::new(format_us(raw.p95_us)).size(15.0));
-                        ui.end_row();
+                egui::Frame::none()
+                    .fill(PANEL)
+                    .rounding(8.0)
+                    .inner_margin(egui::Margin::same(16.0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("SESSION TIMING HEALTH AUDIT")
+                                .size(14.0)
+                                .strong()
+                                .color(ACCENT),
+                        );
+                        ui.add_space(10.0);
+                        egui::Grid::new("lab_details")
+                            .num_columns(4)
+                            .spacing([36.0, 10.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("Median (p50):").size(15.0).strong());
+                                ui.label(RichText::new(format_us(raw.p50_us)).size(15.0));
+                                ui.label(RichText::new("p95 Percentile:").size(15.0).strong());
+                                ui.label(RichText::new(format_us(raw.p95_us)).size(15.0));
+                                ui.end_row();
 
-                        ui.label(RichText::new("Overall Health:").size(15.0).strong());
-                        let (col, txt) = match raw.health.as_str() {
-                            "ULTRA STABLE" => (GREEN, "🟢 ULTRA STABLE"),
-                            "EXCELLENT" => (GREEN, "🟢 EXCELLENT"),
-                            "MODERATE" => (AMBER, "🟡 MODERATE JITTER"),
-                            _ => (RED, "🔴 HIGH TAIL DETECTED"),
-                        };
-                        ui.label(RichText::new(txt).size(15.0).strong().color(col));
+                                ui.label(RichText::new("Overall Health:").size(15.0).strong());
+                                let (col, txt) = match raw.health.as_str() {
+                                    "ULTRA STABLE" => (GREEN, "🟢 ULTRA STABLE"),
+                                    "EXCELLENT" => (GREEN, "🟢 EXCELLENT"),
+                                    "MODERATE" => (AMBER, "🟡 MODERATE JITTER"),
+                                    _ => (RED, "🔴 HIGH TAIL DETECTED"),
+                                };
+                                ui.label(RichText::new(txt).size(15.0).strong().color(col));
 
-                        ui.label(RichText::new("Spin Duty Cycle:").size(15.0).strong());
-                        ui.label(RichText::new(format!("{:.2}% (Capped < 3%)", raw.spin_duty_pct)).size(15.0));
-                        ui.end_row();
+                                ui.label(RichText::new("Spin Duty Cycle:").size(15.0).strong());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{:.2}% (Capped < 3%)",
+                                        raw.spin_duty_pct
+                                    ))
+                                    .size(15.0),
+                                );
+                                ui.end_row();
+                            });
                     });
-                });
             });
         });
     }
@@ -734,15 +878,11 @@ impl HermesApp {
                                 ui.label(RichText::new("Mode:").size(15.0).strong());
                                 if ui.radio(self.is_auto_hz, RichText::new("Auto Detect").size(14.0)).clicked() {
                                     self.is_auto_hz = true;
-                                    if let Ok(mut d) = self.hz_detector.lock() {
-                                        d.set_auto();
-                                    }
+                                    self.pll_shared.store_hz_config(HzMode::Auto, self.selected_mouse_hz);
                                 }
                                 if ui.radio(!self.is_auto_hz, RichText::new("Manual Force").size(14.0)).clicked() {
                                     self.is_auto_hz = false;
-                                    if let Ok(mut d) = self.hz_detector.lock() {
-                                        d.set_manual(self.selected_mouse_hz);
-                                    }
+                                    self.pll_shared.store_hz_config(HzMode::Manual, self.selected_mouse_hz);
                                 }
                             });
 
@@ -757,14 +897,14 @@ impl HermesApp {
                                         for &cand in POLLING_CANDIDATES {
                                             if ui.selectable_value(&mut self.selected_mouse_hz, cand, RichText::new(format!("{cand} Hz")).size(15.0)).clicked() {
                                                 self.is_auto_hz = false;
-                                                if let Ok(mut d) = self.hz_detector.lock() {
-                                                    d.set_manual(cand);
-                                                }
+                                                self.pll_shared.store_hz_config(HzMode::Manual, cand);
                                             }
                                         }
                                     });
                             });
                             ui.add_space(4.0);
+                            ui.label(RichText::new(format!("Worker-resolved rate: {} Hz", self.latest_resolved_hz))
+                                .size(13.0).color(Color32::from_gray(160)));
                             ui.label(RichText::new("💡 TIP: Set to match your mouse physical polling rate (e.g. 1000 Hz or 4000/8000 Hz for high-end gaming mice).")
                                 .size(13.0).color(Color32::from_gray(160)));
 
@@ -983,9 +1123,9 @@ impl HermesApp {
         trim_graph(&mut self.wake_history, now_s);
         trim_graph(&mut self.jitter_history, now_s);
 
-        let mon = self.clock_monitor.lock().unwrap();
-        self.latest_clock_mean_us = mon.mean_us();
-        self.latest_clock_instability = mon.instability_ratio();
+        self.latest_resolved_hz = snap.resolved_hz;
+        self.latest_clock_mean_us = snap.clock_mean_us;
+        self.latest_clock_instability = snap.clock_instability;
     }
 }
 
@@ -1017,29 +1157,56 @@ impl Drop for HermesApp {
 }
 
 fn layer_card(ui: &mut egui::Ui, title: &str, value: String, subtitle: &str) {
-    egui::Frame::none().fill(PANEL).rounding(8.0).inner_margin(egui::Margin::same(16.0))
+    egui::Frame::none()
+        .fill(PANEL)
+        .rounding(8.0)
+        .inner_margin(egui::Margin::same(16.0))
         .show(ui, |ui| {
             ui.set_min_height(95.0);
             ui.label(RichText::new(title).size(13.0).strong().color(ACCENT));
             ui.add_space(6.0);
-            ui.label(RichText::new(value).size(22.0).strong().color(Color32::WHITE));
+            ui.label(
+                RichText::new(value)
+                    .size(22.0)
+                    .strong()
+                    .color(Color32::WHITE),
+            );
             ui.add_space(4.0);
-            ui.label(RichText::new(subtitle).size(13.0).color(Color32::from_gray(150)));
+            ui.label(
+                RichText::new(subtitle)
+                    .size(13.0)
+                    .color(Color32::from_gray(150)),
+            );
         });
 }
 
 fn metric_card(ui: &mut egui::Ui, label: &str, value: String, alert: bool) {
-    egui::Frame::none().fill(PANEL).rounding(8.0).inner_margin(egui::Margin::same(14.0))
+    egui::Frame::none()
+        .fill(PANEL)
+        .rounding(8.0)
+        .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
             ui.set_min_height(70.0);
-            ui.label(RichText::new(label).size(13.0).strong().color(Color32::from_gray(150)));
+            ui.label(
+                RichText::new(label)
+                    .size(13.0)
+                    .strong()
+                    .color(Color32::from_gray(150)),
+            );
             ui.add_space(6.0);
-            ui.label(RichText::new(value).size(22.0).strong().color(if alert { RED } else { Color32::WHITE }));
+            ui.label(RichText::new(value).size(22.0).strong().color(if alert {
+                RED
+            } else {
+                Color32::WHITE
+            }));
         });
 }
 
 fn trim_graph(history: &mut VecDeque<[f64; 2]>, newest_seconds: f64) {
-    while history.front().is_some_and(|p| newest_seconds - p[0] > 30.0) {
+    while history
+        .front()
+        .is_some_and(|p| newest_seconds - p[0] > 30.0)
+    {
         history.pop_front();
     }
     while history.len() > 640 {
@@ -1059,10 +1226,18 @@ fn configure_style(ctx: &egui::Context) {
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(38, 46, 62));
 
     let mut style = (*ctx.style()).clone();
-    style.text_styles.insert(egui::TextStyle::Body, FontId::proportional(15.0));
-    style.text_styles.insert(egui::TextStyle::Button, FontId::proportional(15.0));
-    style.text_styles.insert(egui::TextStyle::Heading, FontId::proportional(22.0));
-    style.text_styles.insert(egui::TextStyle::Small, FontId::proportional(13.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Body, FontId::proportional(15.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, FontId::proportional(15.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Heading, FontId::proportional(22.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Small, FontId::proportional(13.0));
     ctx.set_style(style);
 
     ctx.set_visuals(visuals);

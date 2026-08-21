@@ -1,17 +1,35 @@
 //! Hermes 3-Layer Phase-Locked Loop engine (Ultimate Edition).
 //! v5.6: Anti-oscillation design — slow EMA + deadband + clamped correction.
 
-use std::f64::consts::PI;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use crate::input::{HzConfig, HzControl, HzMode};
 use crate::platform::HighResClock;
+use std::f64::consts::PI;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+pub const TELEMETRY_PUBLISH_INTERVAL_TICKS: u64 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TickRate { Hz64, Hz128 }
+pub enum TickRate {
+    Hz64,
+    Hz128,
+}
 
 impl TickRate {
-    pub fn hz(self) -> u32 { match self { Self::Hz64 => 64, Self::Hz128 => 128 } }
-    pub fn us_per_tick(self) -> f64 { 1_000_000.0 / self.hz() as f64 }
-    pub fn next(self) -> Self { match self { Self::Hz64 => Self::Hz128, Self::Hz128 => Self::Hz64 } }
+    pub fn hz(self) -> u32 {
+        match self {
+            Self::Hz64 => 64,
+            Self::Hz128 => 128,
+        }
+    }
+    pub fn us_per_tick(self) -> f64 {
+        1_000_000.0 / self.hz() as f64
+    }
+    pub fn next(self) -> Self {
+        match self {
+            Self::Hz64 => Self::Hz128,
+            Self::Hz128 => Self::Hz64,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -46,94 +64,220 @@ pub struct PllSnapshot {
     pub lfo_us: f64,
     pub active_layer: u8,
     pub spin_duty_pct: f64,
+    pub resolved_hz: u32,
+    pub clock_mean_us: f64,
+    pub clock_instability: f64,
+    pub clock_samples: u32,
+}
+
+/// UI-to-L0 configuration. Alignment keeps these UI-written atomics away
+/// from the worker-written telemetry cache lines.
+#[repr(align(64))]
+pub struct L0Control {
+    tick_rate: AtomicU32,
+    hz: HzControl,
+    kp_bits: AtomicU64,
+    ki_bits: AtomicU64,
+    lfo_amp_bits: AtomicU64,
+    lfo_period_bits: AtomicU64,
+    /// Global PLL power multiplier (0.1 = ultra-soft, 2.0 = razor-sharp).
+    pll_power_bits: AtomicU64,
+}
+
+/// Read-only L0 snapshots for observers. Only the timing worker writes these
+/// atomics, and it does so at a reduced cadence.
+#[repr(align(64))]
+pub struct L0Telemetry {
+    sleep_us: AtomicU64,
+    phase_error_us: AtomicU64,
+    jitter_ema_us: AtomicU64,
+    cs_latency_us: AtomicU64,
+    tick_index: AtomicU64,
+    mouse_shift_us: AtomicU64,
+    lfo_us: AtomicU64,
+    spin_duty_pct: AtomicU64,
+    resolved_hz: AtomicU32,
+    clock_mean_us: AtomicU64,
+    clock_instability: AtomicU64,
+    clock_samples: AtomicU32,
 }
 
 pub struct PllShared {
-    pub sleep_us: AtomicU64,
-    pub phase_error_us: AtomicU64,
-    pub jitter_ema_us: AtomicU64,
-    pub cs_latency_us: AtomicU64,
-    pub tick_index: AtomicU64,
-    pub mouse_shift_us: AtomicU64,
-    pub lfo_us: AtomicU64,
-    pub spin_duty_pct: AtomicU64,
-    pub click_pending: AtomicBool,
-    pub tick_rate: AtomicU32,
-    pub kp_bits: AtomicU64,
-    pub ki_bits: AtomicU64,
-    pub lfo_amp_bits: AtomicU64,
-    pub lfo_period_bits: AtomicU64,
-    /// Global PLL power multiplier (0.1 = ultra-soft, 2.0 = razor-sharp).
-    pub pll_power_bits: AtomicU64,
+    control: L0Control,
+    telemetry: L0Telemetry,
 }
 
 impl PllShared {
-    pub fn new(tick_rate: TickRate) -> Self {
+    pub fn new(tick_rate: TickRate, hz_mode: HzMode, manual_hz: u32) -> Self {
         let cfg = PllConfig::default();
         Self {
-            sleep_us: AtomicU64::new(0),
-            phase_error_us: AtomicU64::new(0),
-            jitter_ema_us: AtomicU64::new(0),
-            cs_latency_us: AtomicU64::new(0),
-            tick_index: AtomicU64::new(0),
-            mouse_shift_us: AtomicU64::new(0),
-            lfo_us: AtomicU64::new(0),
-            spin_duty_pct: AtomicU64::new(0),
-            click_pending: AtomicBool::new(false),
-            tick_rate: AtomicU32::new(tick_rate.hz()),
-            kp_bits: AtomicU64::new(cfg.kp.to_bits()),
-            ki_bits: AtomicU64::new(cfg.ki.to_bits()),
-            lfo_amp_bits: AtomicU64::new(cfg.lfo_amp_us.to_bits()),
-            lfo_period_bits: AtomicU64::new(cfg.lfo_period_s.to_bits()),
-            pll_power_bits: AtomicU64::new(1.0_f64.to_bits()),
+            control: L0Control {
+                tick_rate: AtomicU32::new(tick_rate.hz()),
+                hz: HzControl::new(hz_mode, manual_hz),
+                kp_bits: AtomicU64::new(cfg.kp.to_bits()),
+                ki_bits: AtomicU64::new(cfg.ki.to_bits()),
+                lfo_amp_bits: AtomicU64::new(cfg.lfo_amp_us.to_bits()),
+                lfo_period_bits: AtomicU64::new(cfg.lfo_period_s.to_bits()),
+                pll_power_bits: AtomicU64::new(1.0_f64.to_bits()),
+            },
+            telemetry: L0Telemetry {
+                sleep_us: AtomicU64::new(0),
+                phase_error_us: AtomicU64::new(0),
+                jitter_ema_us: AtomicU64::new(0),
+                cs_latency_us: AtomicU64::new(0),
+                tick_index: AtomicU64::new(0),
+                mouse_shift_us: AtomicU64::new(0),
+                lfo_us: AtomicU64::new(0),
+                spin_duty_pct: AtomicU64::new(0),
+                resolved_hz: AtomicU32::new(match hz_mode {
+                    HzMode::Auto => 125,
+                    HzMode::Manual => manual_hz,
+                }),
+                clock_mean_us: AtomicU64::new(0),
+                clock_instability: AtomicU64::new(0),
+                clock_samples: AtomicU32::new(0),
+            },
         }
     }
+
     pub fn store_power(&self, power: f64) {
-        self.pll_power_bits.store(power.to_bits(), Ordering::Release);
+        self.control
+            .pll_power_bits
+            .store(power.to_bits(), Ordering::Release);
     }
+
     pub fn load_power(&self) -> f64 {
-        f64::from_bits(self.pll_power_bits.load(Ordering::Acquire))
+        f64::from_bits(self.control.pll_power_bits.load(Ordering::Acquire))
     }
+
     pub fn store_cfg(&self, cfg: PllConfig) {
-        self.kp_bits.store(cfg.kp.to_bits(), Ordering::Release);
-        self.ki_bits.store(cfg.ki.to_bits(), Ordering::Release);
-        self.pll_power_bits.store(cfg.power.to_bits(), Ordering::Release);
-        self.lfo_amp_bits.store(cfg.lfo_amp_us.to_bits(), Ordering::Release);
-        self.lfo_period_bits.store(cfg.lfo_period_s.to_bits(), Ordering::Release);
+        self.control
+            .kp_bits
+            .store(cfg.kp.to_bits(), Ordering::Release);
+        self.control
+            .ki_bits
+            .store(cfg.ki.to_bits(), Ordering::Release);
+        self.control
+            .pll_power_bits
+            .store(cfg.power.to_bits(), Ordering::Release);
+        self.control
+            .lfo_amp_bits
+            .store(cfg.lfo_amp_us.to_bits(), Ordering::Release);
+        self.control
+            .lfo_period_bits
+            .store(cfg.lfo_period_s.to_bits(), Ordering::Release);
     }
+
     pub fn load_cfg(&self) -> PllConfig {
         PllConfig {
-            kp: f64::from_bits(self.kp_bits.load(Ordering::Acquire)),
-            ki: f64::from_bits(self.ki_bits.load(Ordering::Acquire)),
-            power: f64::from_bits(self.pll_power_bits.load(Ordering::Acquire)),
-            lfo_amp_us: f64::from_bits(self.lfo_amp_bits.load(Ordering::Acquire)),
-            lfo_period_s: f64::from_bits(self.lfo_period_bits.load(Ordering::Acquire)),
+            kp: f64::from_bits(self.control.kp_bits.load(Ordering::Acquire)),
+            ki: f64::from_bits(self.control.ki_bits.load(Ordering::Acquire)),
+            power: f64::from_bits(self.control.pll_power_bits.load(Ordering::Acquire)),
+            lfo_amp_us: f64::from_bits(self.control.lfo_amp_bits.load(Ordering::Acquire)),
+            lfo_period_s: f64::from_bits(self.control.lfo_period_bits.load(Ordering::Acquire)),
         }
     }
+
     pub fn store_tick_rate(&self, rate: TickRate) {
-        self.tick_rate.store(rate.hz(), Ordering::Release);
+        self.control.tick_rate.store(rate.hz(), Ordering::Release);
     }
+
+    pub fn load_tick_rate(&self) -> TickRate {
+        match self.control.tick_rate.load(Ordering::Acquire) {
+            64 => TickRate::Hz64,
+            _ => TickRate::Hz128,
+        }
+    }
+
+    pub fn store_hz_config(&self, mode: HzMode, manual_hz: u32) {
+        self.control.hz.store(mode, manual_hz);
+    }
+
+    pub fn load_hz_config(&self) -> HzConfig {
+        self.control.hz.load()
+    }
+
+    pub fn publish(
+        &self,
+        pll: PllSnapshot,
+        resolved_hz: u32,
+        clock_mean_us: f64,
+        clock_instability: f64,
+        clock_samples: u32,
+    ) {
+        self.telemetry
+            .sleep_us
+            .store(pll.sleep_us.to_bits(), Ordering::Release);
+        self.telemetry
+            .phase_error_us
+            .store(pll.phase_error_us.to_bits(), Ordering::Release);
+        self.telemetry
+            .jitter_ema_us
+            .store(pll.jitter_ema_us.to_bits(), Ordering::Release);
+        self.telemetry
+            .cs_latency_us
+            .store(pll.cs_latency_us.to_bits(), Ordering::Release);
+        self.telemetry
+            .tick_index
+            .store(pll.tick_index, Ordering::Release);
+        self.telemetry
+            .mouse_shift_us
+            .store(pll.mouse_shift_us.to_bits(), Ordering::Release);
+        self.telemetry
+            .lfo_us
+            .store(pll.lfo_us.to_bits(), Ordering::Release);
+        self.telemetry
+            .spin_duty_pct
+            .store(pll.spin_duty_pct.to_bits(), Ordering::Release);
+        self.telemetry
+            .resolved_hz
+            .store(resolved_hz, Ordering::Release);
+        self.telemetry
+            .clock_mean_us
+            .store(clock_mean_us.to_bits(), Ordering::Release);
+        self.telemetry
+            .clock_instability
+            .store(clock_instability.to_bits(), Ordering::Release);
+        self.telemetry
+            .clock_samples
+            .store(clock_samples, Ordering::Release);
+    }
+
     pub fn snapshot(&self) -> PllSnapshot {
         PllSnapshot {
-            tick_index: self.tick_index.load(Ordering::Acquire),
-            sleep_us: f64::from_bits(self.sleep_us.load(Ordering::Acquire)),
-            phase_error_us: f64::from_bits(self.phase_error_us.load(Ordering::Acquire)),
-            jitter_ema_us: f64::from_bits(self.jitter_ema_us.load(Ordering::Acquire)),
-            cs_latency_us: f64::from_bits(self.cs_latency_us.load(Ordering::Acquire)),
-            mouse_shift_us: f64::from_bits(self.mouse_shift_us.load(Ordering::Acquire)),
-            lfo_us: f64::from_bits(self.lfo_us.load(Ordering::Acquire)),
-            spin_duty_pct: f64::from_bits(self.spin_duty_pct.load(Ordering::Acquire)),
+            tick_index: self.telemetry.tick_index.load(Ordering::Acquire),
+            sleep_us: f64::from_bits(self.telemetry.sleep_us.load(Ordering::Acquire)),
+            phase_error_us: f64::from_bits(self.telemetry.phase_error_us.load(Ordering::Acquire)),
+            jitter_ema_us: f64::from_bits(self.telemetry.jitter_ema_us.load(Ordering::Acquire)),
+            cs_latency_us: f64::from_bits(self.telemetry.cs_latency_us.load(Ordering::Acquire)),
+            mouse_shift_us: f64::from_bits(self.telemetry.mouse_shift_us.load(Ordering::Acquire)),
+            lfo_us: f64::from_bits(self.telemetry.lfo_us.load(Ordering::Acquire)),
+            spin_duty_pct: f64::from_bits(self.telemetry.spin_duty_pct.load(Ordering::Acquire)),
             active_layer: 0,
+            resolved_hz: self.telemetry.resolved_hz.load(Ordering::Acquire),
+            clock_mean_us: f64::from_bits(self.telemetry.clock_mean_us.load(Ordering::Acquire)),
+            clock_instability: f64::from_bits(
+                self.telemetry.clock_instability.load(Ordering::Acquire),
+            ),
+            clock_samples: self.telemetry.clock_samples.load(Ordering::Acquire),
         }
     }
 }
 
-struct BrownianNoise { state: u64 }
+struct BrownianNoise {
+    state: u64,
+}
 impl BrownianNoise {
-    fn new(seed: u64) -> Self { Self { state: if seed == 0 { 0x9e3779b97f4a7c15 } else { seed } } }
+    fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 { 0x9e3779b97f4a7c15 } else { seed },
+        }
+    }
     fn next_f64(&mut self) -> f64 {
         let mut x = self.state;
-        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
         self.state = x;
         (x >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
@@ -160,6 +304,10 @@ pub struct PllEngine {
     pub last_mouse_us: f64,
     pub total_spin_us: f64,
     pub total_tick_us: f64,
+    pub latest_sleep_us: f64,
+    pub latest_cs_latency_us: f64,
+    pub latest_mouse_shift_us: f64,
+    pub latest_spin_duty_pct: f64,
     rng: BrownianNoise,
 }
 
@@ -175,17 +323,25 @@ impl PllEngine {
         let cfg = PllConfig::default();
         let target = tick_rate.us_per_tick();
         Self {
-            clock, cfg, tick_rate,
+            clock,
+            cfg,
+            tick_rate,
             integral: 0.0,
             integral_limit: 0.02 * target,
             jitter_ema_us: 0.0,
             latest_phase_error_us: 0.0,
             smoothed_phase_error: 0.0,
-            lfo_value: 0.0, lfo_step: 0.0,
+            lfo_value: 0.0,
+            lfo_step: 0.0,
             tick_index: 0,
             mouse_velocity_ema: 0.0,
             last_mouse_us: 0.0,
-            total_spin_us: 0.0, total_tick_us: 0.0,
+            total_spin_us: 0.0,
+            total_tick_us: 0.0,
+            latest_sleep_us: 0.0,
+            latest_cs_latency_us: 0.0,
+            latest_mouse_shift_us: 0.0,
+            latest_spin_duty_pct: 0.0,
             rng: BrownianNoise::new(0xdeadbeef),
         }
     }
@@ -228,7 +384,8 @@ impl PllEngine {
         if self.lfo_step >= 1.0 {
             self.lfo_step -= 1.0;
             let step = self.rng.gaussian() * 0.5;
-            self.lfo_value = (self.lfo_value + step).clamp(-self.cfg.lfo_amp_us, self.cfg.lfo_amp_us);
+            self.lfo_value =
+                (self.lfo_value + step).clamp(-self.cfg.lfo_amp_us, self.cfg.lfo_amp_us);
         }
 
         // === ANTI-OSCILLATION CONTROLLER ===
@@ -254,8 +411,12 @@ impl PllEngine {
 
         // 4. Planned sleep = target period minus clamped correction
         let mut sleep_us = target_period_us - correction + mouse_shift_us + self.lfo_value;
-        if sleep_us < 500.0 { sleep_us = 500.0; }
-        if sleep_us > target_period_us * 1.2 { sleep_us = target_period_us * 1.2; }
+        if sleep_us < 500.0 {
+            sleep_us = 500.0;
+        }
+        if sleep_us > target_period_us * 1.2 {
+            sleep_us = target_period_us * 1.2;
+        }
 
         self.tick_index += 1;
         sleep_us
@@ -268,7 +429,7 @@ impl PllEngine {
         planned_us: f64,
         actual_total_us: f64,
         spin_us: f64,
-        shared: &PllShared,
+        mouse_shift_us: f64,
     ) {
         let target_period_us = self.tick_rate.us_per_tick();
 
@@ -292,15 +453,32 @@ impl PllEngine {
         self.total_tick_us += actual_total_us;
         let duty = if self.total_tick_us > 0.0 {
             (self.total_spin_us / self.total_tick_us) * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
-        shared.sleep_us.store(planned_us.to_bits(), Ordering::Release);
-        shared.phase_error_us.store(self.smoothed_phase_error.to_bits(), Ordering::Release);
-        shared.jitter_ema_us.store(self.jitter_ema_us.to_bits(), Ordering::Release);
-        shared.cs_latency_us.store(overshoot.to_bits(), Ordering::Release);
-        shared.tick_index.store(self.tick_index, Ordering::Release);
-        shared.lfo_us.store(self.lfo_value.to_bits(), Ordering::Release);
-        shared.spin_duty_pct.store(duty.to_bits(), Ordering::Release);
+        self.latest_sleep_us = planned_us;
+        self.latest_cs_latency_us = overshoot;
+        self.latest_mouse_shift_us = mouse_shift_us;
+        self.latest_spin_duty_pct = duty;
+    }
+
+    pub fn snapshot(&self) -> PllSnapshot {
+        PllSnapshot {
+            tick_index: self.tick_index,
+            sleep_us: self.latest_sleep_us,
+            phase_error_us: self.smoothed_phase_error,
+            jitter_ema_us: self.jitter_ema_us,
+            cs_latency_us: self.latest_cs_latency_us,
+            mouse_shift_us: self.latest_mouse_shift_us,
+            lfo_us: self.lfo_value,
+            active_layer: 0,
+            spin_duty_pct: self.latest_spin_duty_pct,
+            resolved_hz: 0,
+            clock_mean_us: 0.0,
+            clock_instability: 0.0,
+            clock_samples: 0,
+        }
     }
 }
 
@@ -326,7 +504,9 @@ mod tests {
     #[test]
     fn resync_resets_state() {
         let mut e = PllEngine::new(TickRate::Hz128);
-        for _ in 0..10 { let _ = e.compute_planned_sleep_us(0.0); }
+        for _ in 0..10 {
+            let _ = e.compute_planned_sleep_us(0.0);
+        }
         e.resync();
         assert_eq!(e.integral, 0.0);
         assert_eq!(e.smoothed_phase_error, 0.0);
@@ -334,29 +514,49 @@ mod tests {
 
     #[test]
     fn shared_snapshot_roundtrip() {
-        let sh = PllShared::new(TickRate::Hz128);
-        sh.sleep_us.store(1500.0_f64.to_bits(), Ordering::Release);
+        let sh = PllShared::new(TickRate::Hz128, HzMode::Manual, 1000);
+        sh.publish(
+            PllSnapshot {
+                sleep_us: 1500.0,
+                ..PllSnapshot::default()
+            },
+            1000,
+            7812.5,
+            0.01,
+            64,
+        );
         let s = sh.snapshot();
         assert_eq!(s.sleep_us as u32, 1500);
+        assert_eq!(s.resolved_hz, 1000);
+        assert_eq!(s.clock_samples, 64);
+        assert_eq!(s.clock_mean_us, 7812.5);
+        assert_eq!(s.clock_instability, 0.01);
+    }
+
+    #[test]
+    fn control_and_telemetry_are_cache_line_aligned() {
+        assert_eq!(std::mem::align_of::<L0Control>(), 64);
+        assert_eq!(std::mem::align_of::<L0Telemetry>(), 64);
     }
 
     #[test]
     fn no_drift_after_many_ticks() {
         let mut e = PllEngine::new(TickRate::Hz64);
-        let shared = PllShared::new(TickRate::Hz64);
         for _ in 0..5000 {
             let s = e.compute_planned_sleep_us(0.0);
             let actual = s + 1.0;
-            e.record_actual_cycle(s, actual, 1.0, &shared);
+            e.record_actual_cycle(s, actual, 1.0, 0.0);
         }
-        let last_sleep = f64::from_bits(shared.sleep_us.load(Ordering::Acquire));
-        assert!(last_sleep > 14_000.0 && last_sleep < 17_000.0, "drift: {last_sleep}");
+        let last_sleep = e.snapshot().sleep_us;
+        assert!(
+            last_sleep > 14_000.0 && last_sleep < 17_000.0,
+            "drift: {last_sleep}"
+        );
     }
 
     #[test]
     fn deadband_prevents_oscillation() {
         let mut e = PllEngine::new(TickRate::Hz128);
-        let shared = PllShared::new(TickRate::Hz128);
         let target = 7812.5;
         // Simulate pure noise (no systematic drift) — sleep should stay near target
         for _ in 0..500 {
@@ -364,9 +564,9 @@ mod tests {
             // Windows adds random ±1500 µs noise each tick
             let noise = (e.tick_index % 13) as f64 * 100.0 - 600.0;
             let actual = target + noise;
-            e.record_actual_cycle(s, actual, 80.0, &shared);
+            e.record_actual_cycle(s, actual, 80.0, 0.0);
         }
-        let last_sleep = f64::from_bits(shared.sleep_us.load(Ordering::Acquire));
+        let last_sleep = e.snapshot().sleep_us;
         assert!(
             last_sleep > target * 0.85 && last_sleep < target * 1.15,
             "oscillation detected: sleep={last_sleep} target={target}"

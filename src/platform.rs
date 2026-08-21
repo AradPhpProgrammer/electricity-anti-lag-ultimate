@@ -69,7 +69,9 @@ pub struct HighResClock {
 
 impl HighResClock {
     pub fn new() -> Self {
-        Self { origin: Instant::now() }
+        Self {
+            origin: Instant::now(),
+        }
     }
 
     pub fn now_us(&self) -> f64 {
@@ -95,6 +97,8 @@ pub struct ClockStabilityMonitor {
     intervals: Vec<f64>,
     pos: usize,
     last_us: Option<f64>,
+    sum: f64,
+    sum_sq: f64,
 }
 
 impl ClockStabilityMonitor {
@@ -104,6 +108,8 @@ impl ClockStabilityMonitor {
             intervals: Vec::with_capacity(cap),
             pos: 0,
             last_us: None,
+            sum: 0.0,
+            sum_sq: 0.0,
         }
     }
 
@@ -112,12 +118,16 @@ impl ClockStabilityMonitor {
             let dt = (now_us - prev).max(0.0);
             if self.intervals.len() < self.intervals.capacity() {
                 self.intervals.push(dt);
+                self.sum += dt;
+                self.sum_sq += dt * dt;
             } else {
-                if self.pos >= self.intervals.len() {
-                    self.pos = 0;
-                }
+                let old = self.intervals[self.pos];
+                self.sum -= old;
+                self.sum_sq -= old * old;
                 self.intervals[self.pos] = dt;
-                self.pos += 1;
+                self.sum += dt;
+                self.sum_sq += dt * dt;
+                self.pos = (self.pos + 1) % self.intervals.len();
             }
         }
         self.last_us = Some(now_us);
@@ -127,7 +137,7 @@ impl ClockStabilityMonitor {
         if self.intervals.is_empty() {
             0.0
         } else {
-            self.intervals.iter().sum::<f64>() / self.intervals.len() as f64
+            self.sum / self.intervals.len() as f64
         }
     }
 
@@ -136,13 +146,8 @@ impl ClockStabilityMonitor {
             return 0.0;
         }
         let mean = self.mean_us();
-        let var: f64 = self
-            .intervals
-            .iter()
-            .map(|v| (v - mean).powi(2))
-            .sum::<f64>()
-            / self.intervals.len() as f64;
-        var.sqrt()
+        let variance = (self.sum_sq / self.intervals.len() as f64 - mean * mean).max(0.0);
+        variance.sqrt()
     }
 
     /// Coefficient of variation (std_dev / mean). A well-behaved clock
@@ -213,5 +218,54 @@ mod tests {
         }
         let cv = mon.instability_ratio();
         assert!(cv > 0.05 && cv < 0.15, "expected CV ~0.10, got {cv}");
+    }
+
+    #[test]
+    fn clock_stability_wraparound_keeps_only_latest_samples() {
+        let mut mon = ClockStabilityMonitor::new(8);
+        let mut t = 0.0;
+        mon.observe(t);
+        for interval in 1..=12 {
+            t += interval as f64;
+            mon.observe(t);
+        }
+
+        // The retained intervals are 5..=12.
+        assert_eq!(mon.samples(), 8);
+        assert!((mon.mean_us() - 8.5).abs() < 1e-12);
+        assert!((mon.std_dev_us() - 5.25_f64.sqrt()).abs() < 1e-12);
+        assert!((mon.instability_ratio() - 5.25_f64.sqrt() / 8.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn clock_stability_preserves_minimum_capacity() {
+        let mut mon = ClockStabilityMonitor::new(1);
+        let mut t = 0.0;
+        mon.observe(t);
+        for _ in 0..12 {
+            t += 250.0;
+            mon.observe(t);
+        }
+
+        assert_eq!(mon.samples(), 8);
+        assert!((mon.mean_us() - 250.0).abs() < 1e-12);
+        assert_eq!(mon.std_dev_us(), 0.0);
+        assert_eq!(mon.instability_ratio(), 0.0);
+    }
+
+    #[test]
+    fn clock_stability_many_samples_remains_stable() {
+        let mut mon = ClockStabilityMonitor::new(32);
+        let mut t = 0.0;
+        mon.observe(t);
+        for i in 0..10_000 {
+            t += if i % 2 == 0 { 990.0 } else { 1010.0 };
+            mon.observe(t);
+        }
+
+        assert_eq!(mon.samples(), 32);
+        assert!((mon.mean_us() - 1000.0).abs() < 1e-9);
+        assert!((mon.std_dev_us() - 10.0).abs() < 1e-9);
+        assert!((mon.instability_ratio() - 0.01).abs() < 1e-12);
     }
 }

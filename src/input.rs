@@ -17,6 +17,61 @@ pub enum HzMode {
     Manual,
 }
 
+/// Immutable polling-rate configuration transferred from the UI to the
+/// worker. The detector itself remains worker-local.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HzConfig {
+    pub mode: HzMode,
+    pub manual_hz: u32,
+}
+
+const MANUAL_MODE_BIT: u32 = 1 << 31;
+const HZ_VALUE_MASK: u32 = !MANUAL_MODE_BIT;
+
+impl HzConfig {
+    fn pack(self) -> u32 {
+        let mode = match self.mode {
+            HzMode::Auto => 0,
+            HzMode::Manual => MANUAL_MODE_BIT,
+        };
+        mode | self.manual_hz.min(HZ_VALUE_MASK)
+    }
+
+    fn unpack(packed: u32) -> Self {
+        Self {
+            mode: if packed & MANUAL_MODE_BIT == 0 {
+                HzMode::Auto
+            } else {
+                HzMode::Manual
+            },
+            manual_hz: packed & HZ_VALUE_MASK,
+        }
+    }
+}
+
+/// Packed atomic UI-to-worker polling-rate control. Keeping the mode and
+/// manual rate in one word gives each worker tick one coherent config load.
+pub struct HzControl {
+    packed: AtomicU32,
+}
+
+impl HzControl {
+    pub fn new(mode: HzMode, manual_hz: u32) -> Self {
+        Self {
+            packed: AtomicU32::new(HzConfig { mode, manual_hz }.pack()),
+        }
+    }
+
+    pub fn store(&self, mode: HzMode, manual_hz: u32) {
+        self.packed
+            .store(HzConfig { mode, manual_hz }.pack(), Ordering::Release);
+    }
+
+    pub fn load(&self) -> HzConfig {
+        HzConfig::unpack(self.packed.load(Ordering::Acquire))
+    }
+}
+
 impl HzMode {
     pub fn label(self) -> &'static str {
         match self {
@@ -45,17 +100,13 @@ pub fn snap_polling_rate(raw_hz: f64) -> u32 {
     best.min(1000).max(125)
 }
 
-/// Auto/Manual Hz detector. Worker writes via `feed_us`; GUI reads via
-/// `last_hz` / `mode`.
+/// Auto/Manual Hz detector owned exclusively by the timing worker.
 pub struct HzDetector {
     pub ema_hz: f64,
     pub samples: u32,
     pub mode: HzMode,
     pub manual_hz: u32,
     pub last_us: f64,
-    pub hz_atomic: AtomicU32,
-    pub mode_atomic: AtomicU32,
-    pub manual_hz_atomic: AtomicU32,
 }
 
 impl HzDetector {
@@ -66,12 +117,6 @@ impl HzDetector {
             mode,
             manual_hz,
             last_us: 0.0,
-            hz_atomic: AtomicU32::new(0),
-            mode_atomic: AtomicU32::new(match mode {
-                HzMode::Auto => 0,
-                HzMode::Manual => 1,
-            }),
-            manual_hz_atomic: AtomicU32::new(manual_hz),
         }
     }
 
@@ -88,8 +133,6 @@ impl HzDetector {
             }
         }
         self.last_us = now_us;
-        let resolved = self.resolved_hz();
-        self.hz_atomic.store(resolved, Ordering::Release);
     }
 
     pub fn resolved_hz(&self) -> u32 {
@@ -102,15 +145,15 @@ impl HzDetector {
     pub fn set_manual(&mut self, hz: u32) {
         self.mode = HzMode::Manual;
         self.manual_hz = hz;
-        self.mode_atomic.store(1, Ordering::Release);
-        self.manual_hz_atomic.store(hz, Ordering::Release);
-        self.hz_atomic.store(hz, Ordering::Release);
     }
 
     pub fn set_auto(&mut self) {
         self.mode = HzMode::Auto;
-        self.mode_atomic.store(0, Ordering::Release);
-        self.hz_atomic.store(self.resolved_hz(), Ordering::Release);
+    }
+
+    pub fn apply_config(&mut self, config: HzConfig) {
+        self.manual_hz = config.manual_hz;
+        self.mode = config.mode;
     }
 }
 
@@ -242,6 +285,27 @@ mod tests {
         assert_eq!(snap_polling_rate(990.0), 1000);
         assert_eq!(snap_polling_rate(620.0), 500);
         assert_eq!(snap_polling_rate(130.0), 125);
+    }
+
+    #[test]
+    fn hz_control_packs_mode_and_manual_rate_coherently() {
+        let control = HzControl::new(HzMode::Auto, 1000);
+        assert_eq!(
+            control.load(),
+            HzConfig {
+                mode: HzMode::Auto,
+                manual_hz: 1000,
+            }
+        );
+
+        control.store(HzMode::Manual, 8000);
+        assert_eq!(
+            control.load(),
+            HzConfig {
+                mode: HzMode::Manual,
+                manual_hz: 8000,
+            }
+        );
     }
 
     #[test]
